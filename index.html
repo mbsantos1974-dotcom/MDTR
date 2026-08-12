@@ -742,14 +742,15 @@ function recompute(){
     const pf=projFactor();
     const wM=W.MES;
     const curIdx  = wM.partial;
-    const baseIdx = (STATE.cmpMode==="yoy"&&wM.projYoy&&wM.projYoy.length)?wM.projYoy:wM.projPrev;
+    // na projeção a comparação é sempre o MESMO mês do ano anterior (ago/26 proj vs ago/25)
+    const baseIdx = (wM.projYoy&&wM.projYoy.length)?wM.projYoy:wM.projPrev;
     for(const r of STATE.rows){
       r.atual = sumIdx(r.vr,curIdx)*pf;  r.uAtu = sumIdx(r.vu,curIdx)*pf;
       r.ant   = sumIdx(r.vr,baseIdx);    r.uAnt = sumIdx(r.vu,baseIdx);
     }
     const pl=periodLabel(STATE.hasPartial?last:M[curIdx[0]]);
     STATE.periods.atuLbl = pl+" (proj.)";
-    STATE.periods.antLbl = (STATE.cmpMode==="yoy"?"ano ant. ":"")+ (baseIdx.length?periodLabel(M[baseIdx[0]]):"—");
+    STATE.periods.antLbl = baseIdx.length?periodLabel(M[baseIdx[0]]):"—";
     STATE.periods.sub = `${pl} projetado (${STATE.proj.dias}/${STATE.proj.total} dias × ${pf.toFixed(2)}) vs ${STATE.periods.antLbl}`;
     return;
   }
@@ -1455,7 +1456,8 @@ function buildPVTable(rows, titulo, ctx, opts){
   const dr=STATE.drill[ctx];
   const t=totals(rows);
   const p=STATE.periods;
-  const F=projFactor();
+  // quando a projeção global está ativa, r.atual JÁ vem projetado do recompute — não multiplicar de novo
+  const F=projActive()?1:projFactor();
   const incCls=v=> v>0?"up":(v<0?"down":"flat");
   const incTxt=v=> (v>0?"+":v<0?"−":"")+fmtBRL(Math.abs(v));
 
@@ -1494,12 +1496,10 @@ function buildPVTable(rows, titulo, ctx, opts){
     {k:"label", t:"Propagandista", num:false},
     {k:"ant",   t:"R$ "+p.antLbl,  num:true},
     {k:"atual", t:"R$ "+p.atuLbl,  num:true},
-    {k:"projR", t:"Projeção R$",   num:true},
     {k:"incR",  t:"Incremento R$", num:true},
     {k:"evoR",  t:"Cresc. R$",     num:true},
     {k:"uAnt",  t:"Qtd "+p.antLbl, num:true},
     {k:"uAtu",  t:"Qtd "+p.atuLbl, num:true},
-    {k:"projQ", t:"Projeção Qtd",  num:true},
     {k:"evoQ",  t:"Cresc. Qtd",    num:true}
   ];
   const head=`<th class="rank">#</th>`+cols.map(c=>{
@@ -1590,46 +1590,39 @@ function buildPVTable(rows, titulo, ctx, opts){
   // --- nível 1: propagandistas ---
   const tbodyPV=pvAgg.map((g,i)=>{
     const open = canDrill && dr.pv===g.key;
+    const primeiroNome = String(g.label).trim().split(/\s+/)[0];
     const nameCell = canDrill
-      ? `<div><span class="caret">${open?"▾":"▸"}</span> ${esc(g.label)}</div><div class="sub">PV ${esc(g.extra.setorCod)}</div>`
-      : `<div>${esc(g.label)}</div><div class="sub">PV ${esc(g.extra.setorCod)}</div>`;
+      ? `<div><span class="caret">${open?"▾":"▸"}</span> ${esc(primeiroNome)}</div><div class="sub">PV ${esc(g.extra.setorCod)}</div>`
+      : `<div>${esc(primeiroNome)}</div><div class="sub">PV ${esc(g.extra.setorCod)}</div>`;
     const row=`<tr class="${canDrill?"drillable":""} ${open?"open":""}" ${canDrill?`data-pv="${esc(g.key)}" data-ctx="${esc(ctx)}"`:""}>
       <td class="rank">${i+1}</td>
       <td class="namecell">${nameCell}</td>
       <td class="num" style="color:var(--muted)">${fmtBRL(g.ant)}</td>
       <td class="num barcell"><div class="bar" style="--w:${g.atual/maxP*100}"></div><span>${fmtBRL(g.atual)}</span></td>
-      <td class="num" style="color:var(--navy);font-weight:800">${fmtBRL(g.projR)}</td>
       <td class="num"><span class="evo ${incCls(g.incR)}">${esc(incTxt(g.incR))}</span></td>
       <td class="num"><span class="evo ${g.evoR.cls}">${esc(g.evoR.txt)}</span></td>
       <td class="num" style="color:var(--muted)">${fmtInt(g.uAnt)}</td>
       <td class="num">${fmtInt(g.uAtu)}</td>
-      <td class="num" style="color:var(--navy);font-weight:800">${fmtInt(g.projQ)}</td>
       <td class="num"><span class="evo ${g.evoQ.cls}">${esc(g.evoQ.txt)}</span></td>
     </tr>`;
-    const det = open ? `<tr class="drill-row"><td colspan="11">${pdvRows(g.key)}</td></tr>` : "";
+    const det = open ? `<tr class="drill-row"><td colspan="9">${pdvRows(g.key)}</td></tr>` : "";
     return row+det;
   }).join("");
 
   const tProjR=t.atual*F, tProjQ=t.uAtu*F, tIncR=tProjR-t.ant;
   const note = canDrill
-    ? `Clique num propagandista para ver as farmácias com venda · Projeção = valor ÷ ${STATE.proj.dias} dia(s) × ${STATE.proj.total} dia(s) · Incremento R$ = Projeção R$ − faturamento de ${p.antLbl}`
-    : `Projeção = valor do período ÷ ${STATE.proj.dias} dia(s) decorrido(s) × ${STATE.proj.total} dia(s) do mês · Incremento R$ = Projeção R$ − faturamento de ${p.antLbl}`;
+    ? `Clique num propagandista para ver as farmácias com venda · Incremento R$ = faturamento projetado do mês − faturamento de ${p.antLbl}`
+    : `Incremento R$ = faturamento projetado do mês (valor ÷ ${STATE.proj.dias} dia(s) × ${STATE.proj.total} dia(s)) − faturamento de ${p.antLbl}`;
 
   return `<div class="panel">
     <div class="panel-head" style="align-items:center; flex-wrap:wrap">
       <span class="panel-title">${esc(titulo||"Faturamento por propagandista")}</span>
-      <span class="proj-ctl">
-        Projeção:
-        <input type="number" id="projDias" min="1" max="31" value="${STATE.proj.dias}" aria-label="Dias decorridos">
-        <span>de</span>
-        <input type="number" id="projTotal" min="1" max="31" value="${STATE.proj.total}" aria-label="Dias do mês">
-        <span>dias</span>
-      </span>
+      <span class="panel-sub">${projActive()?("projeção "+STATE.proj.dias+"/"+STATE.proj.total+" dias · vs "+p.antLbl):(p.atuLbl+" × "+p.antLbl)}</span>
     </div>
     <div class="tbl-scroll">
       <table class="data">
         <thead><tr>${head}</tr></thead>
-        <tbody>${tbodyPV||`<tr><td colspan="11" class="empty-note">Sem dados para os filtros selecionados.</td></tr>`}</tbody>
+        <tbody>${tbodyPV||`<tr><td colspan="9" class="empty-note">Sem dados para os filtros selecionados.</td></tr>`}</tbody>
         <tfoot><tr>
           <td></td>
           <td class="namecell">Total</td>
@@ -2318,19 +2311,6 @@ function sortData(data, st){
 
 /* liga eventos das tabelas após render */
 function wireTableEvents(){
-  // controle de dias da projeção (Visão Geral)
-  const pd=document.getElementById("projDias"), pt=document.getElementById("projTotal");
-  if(pd&&pt){
-    const upd=debounce(()=>{
-      const d=Math.max(1,Math.min(31, Number(pd.value)||1));
-      const tt=Math.max(1,Math.min(31, Number(pt.value)||1));
-      STATE.proj.dias=d; STATE.proj.total=tt;
-      const focused = document.activeElement===pd ? "projDias" : (document.activeElement===pt ? "projTotal" : null);
-      render();
-      if(focused){ const el=document.getElementById(focused); if(el){ el.focus(); el.select(); } }
-    },350);
-    pd.oninput=upd; pt.oninput=upd;
-  }
   document.querySelectorAll("th[data-sort]").forEach(th=>{
     th.onclick=()=>{ const key=findTkey(th); const st=tState(key); const k=th.dataset.sort;
       if(st.sortKey===k) st.sortDir*=-1; else {st.sortKey=k; st.sortDir=(k==="label")?1:-1;}
