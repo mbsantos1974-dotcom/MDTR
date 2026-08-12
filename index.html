@@ -252,6 +252,7 @@ td.num{text-align:right; font-variant-numeric:tabular-nums; font-weight:600; whi
 .tag{display:inline-block; font-size:10.5px; font-weight:800; padding:1px 7px; border-radius:6px; background:var(--navy-050); color:var(--navy); letter-spacing:.3px}
 .tag.rede{background:var(--green-050); color:var(--green-700)}
 .tag.ind{background:#fff3e0; color:#b26a00}
+.tag.naoclass{background:#fceaea; color:#c0392b}
 
 /* data-bar dentro da célula */
 .barcell{position:relative}
@@ -784,6 +785,55 @@ function toNum(v){
   const n=parseFloat(s); return isFinite(n)?n:0;
 }
 function clean(v){ if(v===null||v===undefined) return ""; return String(v).trim(); }
+// Normaliza o "Tipo de PDV" (coluna L) para REDE / INDEPENDENTE,
+// tolerando acentos, espaços extras e caracteres invisíveis.
+function normTipoPDV(v){
+  let s=clean(v)
+    .normalize("NFD").replace(/[\u0300-\u036f]/g,"") // remove acentos
+    .replace(/[\u200b-\u200d\uFEFF]/g,"")            // remove zero-width/BOM
+    .replace(/\s+/g,"")                              // remove todos os espaços
+    .toUpperCase();
+  if(!s) return "—";
+  if(s.startsWith("REDE")) return "REDE";
+  if(s.startsWith("INDEP")) return "INDEPENDENTE";
+  return s;
+}
+// Normaliza nome de bandeira p/ comparação: sem acento, maiúsculo, espaços colapsados.
+function normBand(v){
+  return clean(v)
+    .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+    .replace(/[\u200b-\u200d\uFEFF]/g,"")
+    .replace(/\s+/g," ")
+    .toUpperCase().trim();
+}
+// Classificação Rede/Independente por bandeira (lista fixa definida pela área).
+// Bandeiras que são redes mas devem CONTAR como Independente:
+const BANDEIRAS_INDEPENDENTE = [
+  "REDE INOVA DROGARIAS","REDE SOMA","MELHOR COMPRA","PRECO BAIXO - FRANQUEADAS",
+  "FARMES - REDE DE FARMACIAS","WCL SAUDE","GRUPO MF","DSG FARMA","AUGEFARMA",
+  "HIPER SAUDE","GESTOR MAIS","REDE AMERICANA","NOVA REDE DROGARIAS",
+  "ULTRA POPULAR - FARMARCAS","DROGA REDE","ADFAR","GRUPOFARMA","UAI FARMA",
+  "GRUPO CONCEITO FARMA","FARMELHOR","GRUPO CB DROGARIAS","MAXI POPULAR - FARMARCAS",
+  "GRUPO ASFAR","REDE LUCREMAIS","REDE UNIVERSAL","FARMA E FARMA","REDEFARMA",
+  "GRUPO COMPRE CERTO","SMALLFARMA","DROGARIAS MAX",
+  "I","GRUPO MASTER BRASIL"
+].map(normBand);
+// Bandeiras que devem contar como Rede:
+const BANDEIRAS_REDE = [
+  "INDIANA","DROGASIL","PAGUE MENOS","PACHECO","N/I","SANTA LUCIA",
+  "DROGARIA E FARMACIA MONICA","CRESCERFARMA","PRECO BAIXO","ARAUJO",
+  "FARMACIAS SANTA TEREZINHA","CARREFOUR"
+].map(normBand);
+const SET_INDEP=new Set(BANDEIRAS_INDEPENDENTE), SET_REDE=new Set(BANDEIRAS_REDE);
+// Rótulo amigável para o valor de tipo ("REDE"/"INDEPENDENTE"/"?").
+function tipoLabel(k){ return k==="REDE"?"Rede":(k==="INDEPENDENTE"?"Independente":(k==="?"?"⚠ Não classificada":titleCase(k))); }
+// Retorna "REDE", "INDEPENDENTE" ou "?" (não classificada).
+function classifBandeira(bandeira){
+  const b=normBand(bandeira);
+  if(SET_INDEP.has(b)) return "INDEPENDENTE";
+  if(SET_REDE.has(b))  return "REDE";
+  return "?";
+}
 function titleCase(s){
   s=clean(s).toLowerCase();
   if(!s) return "";
@@ -936,7 +986,7 @@ function parseBuffer(buf, source){
       endereco:end, bairro:bairro,
       bandeira:titleCase(r["Bandeira"]) || "—",
       pdv:clean(r["PDV"]),
-      tipo:clean(r["Tipo PDV"]).toUpperCase() || "—",
+      tipo:classifBandeira(r["Bandeira"]),
       marca:clean(r["Marca"]).replace(/\s*\(EUF\)\s*$/i,"") || "—",
       apresentacao:clean(r["Apresentacao"]),
       provedor:titleCase(r["Provedor"]),
@@ -980,7 +1030,7 @@ function onDataReady(){
   // popular selects
   fillSelect("fSetor", uniqueSorted(STATE.rows.map(r=>r.setor)).map(v=>({v, t:v.replace(/^(\S+)\s*-\s*/,"$1 · ")})), "Todos os PVs");
   fillSelect("fCanal", uniqueSorted(STATE.rows.map(r=>r.canal)).map(v=>({v,t:v})), "Todos os canais");
-  fillSelect("fTipo",  uniqueSorted(STATE.rows.map(r=>r.tipo)).map(v=>({v,t:v==="REDE"?"Rede":titleCase(v)})), "Rede + Independente");
+  fillSelect("fTipo",  uniqueSorted(STATE.rows.map(r=>r.tipo)).map(v=>({v,t:tipoLabel(v)})), "Rede + Independente");
 
   // resumo rodapé
   const pdvs=new Set(STATE.rows.map(r=>r.pdv).filter(Boolean)).size;
@@ -989,6 +1039,17 @@ function onDataReady(){
     uniqueSorted(STATE.rows.map(r=>r.setor)).length+"</b> PVs · <b>"+
     uniqueSorted(STATE.rows.map(r=>r.marca)).length+"</b> produtos"+
     (STATE.skipped?(" · "+fmtInt(STATE.skipped)+" linhas vazias ignoradas"):"");
+
+  // alerta: bandeiras fora das duas listas de classificação
+  const naoClass=uniqueSorted(STATE.rows.filter(r=>r.tipo==="?").map(r=>r.bandeira)).filter(b=>b&&b!=="—");
+  const dsum=document.getElementById("dataSummary");
+  if(naoClass.length){
+    dsum.innerHTML += `<div style="margin-top:8px;padding:8px 12px;border-radius:8px;background:#fceaea;color:#c0392b;font-weight:600">`+
+      `⚠ ${naoClass.length} bandeira(s) sem classificação Rede/Independente: `+
+      naoClass.map(b=>esc(b)).join(", ")+
+      `. Informe onde alocar cada uma.</div>`;
+    console.warn("Bandeiras não classificadas:", naoClass);
+  }
 
   // sincroniza controles temporais com o estado atual
   document.getElementById("cityBtnLbl").textContent = !STATE.cities?"todas":(STATE.cities.size+" selec.");
@@ -1691,7 +1752,7 @@ function viewGeral(rows){
 
   // 6) BARRAS — Tipo de PDV, R$
   const tipo=aggregate(rows,r=>r.tipo).sort((a,b)=>b.atual-a.atual);
-  const tipoItems=tipo.map((g,i)=>({label:g.key==="REDE"?"Rede":titleCase(g.key), value:g.atual, disp:fmtBRLc(g.atual), color:i===0?PALETTE[1]:PALETTE[3]}));
+  const tipoItems=tipo.map((g,i)=>({label:tipoLabel(g.key), value:g.atual, disp:fmtBRLc(g.atual), color:i===0?PALETTE[1]:PALETTE[3]}));
   const chartTipo=`<div class="panel">
     <div class="panel-head"><span class="panel-title">Tipo de PDV · R$</span><span class="panel-sub">${p.atuLbl}</span></div>
     ${svgBarsH(tipoItems,{padL:110})}
@@ -2099,7 +2160,7 @@ function viewRede(rows){
   const chartTipo=`<div class="panel"><div class="panel-head"><span class="panel-title">Rede × Independente</span><span class="panel-sub">${STATE.periods.atuLbl}</span></div>
     <div class="grid" style="grid-template-columns:auto 1fr; gap:18px; align-items:center">
       ${svgDonut(tipo.map((g,i)=>({label:g.key,value:g.atual,color:i===0?PALETTE[1]:PALETTE[3]})),"Tipo PDV","")}
-      ${splitLegend(tipo.map((g,i)=>({label:g.key==="REDE"?"Rede":titleCase(g.key), value:g.atual, pos:g.pos, color:i===0?PALETTE[1]:PALETTE[3]})), t.atual)}
+      ${splitLegend(tipo.map((g,i)=>({label:tipoLabel(g.key), value:g.atual, pos:g.pos, color:i===0?PALETTE[1]:PALETTE[3]})), t.atual)}
     </div></div>`;
   const provItems=prov.map(g=>({label:g.key, value:g.atual, disp:fmtBRLc(g.atual), color:PALETTE[2]}));
   const chartProv=`<div class="panel"><div class="panel-head"><span class="panel-title">Top distribuidores / provedores</span><span class="panel-sub">${STATE.periods.atuLbl}</span></div>${svgBarsH(provItems)}</div>`;
@@ -2170,8 +2231,7 @@ function viewRede(rows){
 
   // tabela por bandeira (nível 1, drilável)
   const data=aggregate(rows,r=>r.bandeira);
-  const tipoMap=new Map(); rows.forEach(r=>{ if(!tipoMap.has(r.bandeira)) tipoMap.set(r.bandeira, r.tipo); });
-  data.forEach(g=>{ g.sub=tipoMap.get(g.key)==="REDE"?"Rede":"Independente"; g.share=t.atual>0?g.atual/t.atual*100:0; g.inc=g.atual-g.ant; });
+  data.forEach(g=>{ const c=classifBandeira(g.key); g.sub=c==="REDE"?"Rede":(c==="INDEPENDENTE"?"Independente":"Não classificada"); g.share=t.atual>0?g.atual/t.atual*100:0; g.inc=g.atual-g.ant; });
   const st=tState("Redes"); sortData(data,st);
   const q=(st.q||"").toLowerCase();
   let view=q?data.filter(g=>String(g.label).toLowerCase().includes(q)):data.slice();
@@ -2197,7 +2257,7 @@ function viewRede(rows){
     const w=(g.atual/maxAtual*100);
     const row=`<tr class="drillable ${open?"open":""}" data-redeband1="${esc(g.key)}">
       <td class="rank">${i+1}</td>
-      <td class="namecell"><div><span class="caret">${open?"▾":"▸"}</span> ${esc(trim(g.label,42))}</div><span class="tag ${g.sub==="Rede"?"rede":"ind"}">${esc(g.sub)}</span></td>
+      <td class="namecell"><div><span class="caret">${open?"▾":"▸"}</span> ${esc(trim(g.label,42))}</div><span class="tag ${g.sub==="Rede"?"rede":(g.sub==="Independente"?"ind":"naoclass")}">${esc(g.sub==="Não classificada"?"⚠ Não classificada":g.sub)}</span></td>
       <td class="num barcell"><div class="bar" style="--w:${w}"></div><span>${fmtBRL(g.atual)}</span></td>
       <td class="num" style="color:var(--muted)">${fmtBRL(g.ant)}</td>
       <td class="num"><span class="evo ${g.evo.cls}">${esc(g.evo.txt)}</span></td>
@@ -2257,7 +2317,7 @@ function buildTable(view, o){
     const w=(g.atual/o.maxAtual*100);
     const clickable=o.clickFilter?`class="clickable" data-filter="${o.clickFilter}" data-val="${esc(g.key)}"`:"";
     const subHtml = o.sub ? (o.tagSub
-        ? `<span class="tag ${g.sub==="Rede"?"rede":"ind"}">${esc(g.sub)}</span>`
+        ? `<span class="tag ${g.sub==="Rede"?"rede":(g.sub==="Independente"?"ind":"naoclass")}">${esc(g.sub==="Não classificada"?"⚠ Não classificada":g.sub)}</span>`
         : `<div class="sub">${esc(g.sub||"")}</div>`) : "";
     return `<tr ${clickable}>
       <td class="rank">${i+1}</td>
