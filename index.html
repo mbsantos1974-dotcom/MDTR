@@ -252,6 +252,9 @@ td.num{text-align:right; font-variant-numeric:tabular-nums; font-weight:600; whi
 .tag{display:inline-block; font-size:10.5px; font-weight:800; padding:1px 7px; border-radius:6px; background:var(--navy-050); color:var(--navy); letter-spacing:.3px}
 .tag.rede{background:var(--green-050); color:var(--green-700)}
 .tag.ind{background:#fff3e0; color:#b26a00}
+.tag.warn{background:var(--neg-bg); color:var(--neg)}
+.band-warn{max-width:1440px; margin:12px auto 0; padding:11px 16px; background:var(--neg-bg); border:1px solid #f3c3c3; border-radius:12px; color:#8f2b2b; font-size:13px; font-weight:600}
+.band-warn b{color:var(--neg)}
 
 /* data-bar dentro da célula */
 .barcell{position:relative}
@@ -505,6 +508,8 @@ footer .fl{display:flex; justify-content:space-between; gap:14px; flex-wrap:wrap
     <div class="chip-period" id="periodChip"></div>
   </section>
 
+  <div id="bandWarn" class="band-warn" style="display:none"></div>
+
   <!-- CONTROLES TEMPORAIS (janela · comparação · projeção · cidade) -->
   <section class="tctrl" aria-label="Controles de período">
     <div class="tctrl-group">
@@ -539,6 +544,10 @@ footer .fl{display:flex; justify-content:space-between; gap:14px; flex-wrap:wrap
     <div class="tctrl-group" style="position:relative">
       <button class="citybtn" id="cityBtn" type="button">Cidades: <b id="cityBtnLbl">todas</b> ▾</button>
       <div class="citypop" id="cityPop" style="display:none"></div>
+    </div>
+    <div class="tctrl-group" style="position:relative">
+      <button class="citybtn" id="prodBtn" type="button">Produtos: <b id="prodBtnLbl">todos</b> ▾</button>
+      <div class="citypop" id="prodPop" style="display:none"></div>
     </div>
     <div class="spacer"></div>
   </section>
@@ -651,6 +660,7 @@ const STATE = {
   periods: null,       // compat (antLbl/atuLbl) — atualizado por recompute()
   filters: {setor:"", canal:"", tipo:""},
   cities: null,        // Set de cidades selecionadas (null = todas)
+  products: null,      // Set de produtos (marca) selecionados (null = todos)
   activeTab: "geral",
   source: "url",       // url | file
   tableState: {},      // por-aba: {sortKey, sortDir, q, showAll}
@@ -667,6 +677,15 @@ function projFactor(){
   return t/d;
 }
 function projActive(){ return STATE.projOn && projFactor()>1; }
+/* rótulo do mês parcial (ex.: "ago/26") para o cabeçalho da coluna de qtd parcial */
+function parcialLbl(){
+  const M=STATE.months; if(!M||!M.length) return "parcial";
+  return STATE.hasPartial ? periodLabel(M[M.length-1]) : (STATE.periods?STATE.periods.atuLbl:"parcial");
+}
+/* <th> da coluna "Qtd parcial" — só aparece na projeção */
+function thParcial(){ return projActive()? `<th class="num">Qtd parcial ${parcialLbl()}</th>` : ""; }
+/* <td> da coluna "Qtd parcial" para um grupo/linha g — só aparece na projeção */
+function tdParcial(g){ return projActive()? `<td class="num" style="color:var(--amber);font-weight:700">${fmtInt(g&&g.uParc||0)}</td>` : ""; }
 
 /* ============================================================================
    ENGINE TEMPORAL — janelas (Mês/Trim/YTD/MAT), modo (Período/Ano anterior),
@@ -745,7 +764,8 @@ function recompute(){
     // na projeção a comparação é sempre o MESMO mês do ano anterior (ago/26 proj vs ago/25)
     const baseIdx = (wM.projYoy&&wM.projYoy.length)?wM.projYoy:wM.projPrev;
     for(const r of STATE.rows){
-      r.atual = sumIdx(r.vr,curIdx)*pf;  r.uAtu = sumIdx(r.vu,curIdx)*pf;
+      const uParc = sumIdx(r.vu,curIdx);
+      r.atual = sumIdx(r.vr,curIdx)*pf;  r.uAtu = uParc*pf;  r.uParc = uParc;
       r.ant   = sumIdx(r.vr,baseIdx);    r.uAnt = sumIdx(r.vu,baseIdx);
     }
     const pl=periodLabel(STATE.hasPartial?last:M[curIdx[0]]);
@@ -761,6 +781,7 @@ function recompute(){
     r.uAtu  = sumIdx(r.vu,w.cur);
     r.ant   = sumIdx(r.vr,baseIdx);
     r.uAnt  = sumIdx(r.vu,baseIdx);
+    r.uParc = 0;
   }
   const sub = (STATE.cmpMode==="yoy"&&w.subYoy)?w.subYoy:w.sub;
   STATE.periods.atuLbl = w.cur.length===1?periodLabel(M[w.cur[0]]):periodLabel(last);
@@ -784,6 +805,40 @@ function toNum(v){
   const n=parseFloat(s); return isFinite(n)?n:0;
 }
 function clean(v){ if(v===null||v===undefined) return ""; return String(v).trim(); }
+// Normaliza bandeira: remove acentos, zero-width/BOM, colapsa espaços e sobe caixa.
+function normBand(v){
+  return clean(v)
+    .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+    .replace(/[\u200b-\u200d\uFEFF]/g,"")
+    .replace(/\s+/g," ")
+    .toUpperCase().trim();
+}
+// Classificação Rede/Independente por BANDEIRA (listas fixas definidas pela área).
+// Bandeiras que devem CONTAR como Independente:
+const BANDEIRAS_INDEPENDENTE = [
+  "REDE INOVA DROGARIAS","REDE SOMA","MELHOR COMPRA","PRECO BAIXO - FRANQUEADAS",
+  "FARMES - REDE DE FARMACIAS","WCL SAUDE","GRUPO MF","DSG FARMA","AUGEFARMA",
+  "HIPER SAUDE","GESTOR MAIS","REDE AMERICANA","NOVA REDE DROGARIAS",
+  "ULTRA POPULAR - FARMARCAS","DROGA REDE","ADFAR","GRUPOFARMA","UAI FARMA",
+  "GRUPO CONCEITO FARMA","FARMELHOR","GRUPO CB DROGARIAS","MAXI POPULAR - FARMARCAS",
+  "GRUPO ASFAR","REDE LUCREMAIS","REDE UNIVERSAL","FARMA E FARMA","REDEFARMA",
+  "GRUPO COMPRE CERTO","SMALLFARMA","DROGARIAS MAX",
+  "I","GRUPO MASTER BRASIL"
+].map(normBand);
+// Bandeiras que devem contar como Rede:
+const BANDEIRAS_REDE = [
+  "INDIANA","DROGASIL","PAGUE MENOS","PACHECO","N/I","SANTA LUCIA",
+  "DROGARIA E FARMACIA MONICA","CRESCERFARMA","PRECO BAIXO","ARAUJO",
+  "FARMACIAS SANTA TEREZINHA","CARREFOUR"
+].map(normBand);
+const SET_INDEP=new Set(BANDEIRAS_INDEPENDENTE), SET_REDE=new Set(BANDEIRAS_REDE);
+// Retorna "REDE", "INDEPENDENTE" ou "?" (não classificada).
+function classifBandeira(bandeira){
+  const b=normBand(bandeira);
+  if(SET_INDEP.has(b)) return "INDEPENDENTE";
+  if(SET_REDE.has(b))  return "REDE";
+  return "?";
+}
 function titleCase(s){
   s=clean(s).toLowerCase();
   if(!s) return "";
@@ -936,7 +991,7 @@ function parseBuffer(buf, source){
       endereco:end, bairro:bairro,
       bandeira:titleCase(r["Bandeira"]) || "—",
       pdv:clean(r["PDV"]),
-      tipo:clean(r["Tipo PDV"]).toUpperCase() || "—",
+      tipo:classifBandeira(r["Bandeira"]),
       marca:clean(r["Marca"]).replace(/\s*\(EUF\)\s*$/i,"") || "—",
       apresentacao:clean(r["Apresentacao"]),
       provedor:titleCase(r["Provedor"]),
@@ -980,7 +1035,18 @@ function onDataReady(){
   // popular selects
   fillSelect("fSetor", uniqueSorted(STATE.rows.map(r=>r.setor)).map(v=>({v, t:v.replace(/^(\S+)\s*-\s*/,"$1 · ")})), "Todos os PVs");
   fillSelect("fCanal", uniqueSorted(STATE.rows.map(r=>r.canal)).map(v=>({v,t:v})), "Todos os canais");
-  fillSelect("fTipo",  uniqueSorted(STATE.rows.map(r=>r.tipo)).map(v=>({v,t:v==="REDE"?"Rede":titleCase(v)})), "Rede + Independente");
+  fillSelect("fTipo",  uniqueSorted(STATE.rows.map(r=>r.tipo)).map(v=>({v,t:v==="REDE"?"Rede":v==="INDEPENDENTE"?"Independente":v==="?"?"⚠ Não classificada":titleCase(v)})), "Rede + Independente");
+
+  // aviso: bandeiras não classificadas (fora das duas listas fixas)
+  const naoClass=[...new Set(STATE.rows.filter(r=>r.tipo==="?").map(r=>r.bandeira))].filter(Boolean).sort((a,b)=>a.localeCompare(b,"pt-BR"));
+  const bw=document.getElementById("bandWarn");
+  if(bw){
+    if(naoClass.length){
+      const nreg=STATE.rows.filter(r=>r.tipo==="?").length;
+      bw.style.display="";
+      bw.innerHTML="⚠ <b>"+naoClass.length+" bandeira(s) não classificada(s)</b> ("+fmtInt(nreg)+" registros) — defina Rede ou Independente para: "+naoClass.map(b=>esc(b)).join(" · ");
+    } else { bw.style.display="none"; bw.innerHTML=""; }
+  }
 
   // resumo rodapé
   const pdvs=new Set(STATE.rows.map(r=>r.pdv).filter(Boolean)).size;
@@ -1013,9 +1079,11 @@ function filtered(){
   const f=STATE.filters;
   const onlyPV = STATE.activeTab==="geral"; // na Visão Geral só o filtro de PV vale
   const cs=STATE.cities; // Set de cidades ou null=todas
+  const ps=STATE.products; // Set de produtos ou null=todos
   return STATE.rows.filter(r=>
     (!f.setor||r.setor===f.setor) &&
     (!cs || cs.has(r.municipio)) &&
+    (!ps || ps.has(r.marca)) &&
     (onlyPV || !f.canal||r.canal===f.canal) &&
     (onlyPV || !f.tipo ||r.tipo ===f.tipo));
 }
@@ -1026,8 +1094,8 @@ function aggregate(rows, keyFn, labelFn){
   for(const r of rows){
     const k=keyFn(r); if(k===null||k===undefined||k==="") continue;
     let g=m.get(k);
-    if(!g){ g={key:k, label:labelFn?labelFn(r):k, atual:0, ant:0, uAtu:0, uAnt:0, pdvs:new Set(), extra:r}; m.set(k,g); }
-    g.atual+=r.atual; g.ant+=r.ant; g.uAtu+=r.uAtu; g.uAnt+=r.uAnt;
+    if(!g){ g={key:k, label:labelFn?labelFn(r):k, atual:0, ant:0, uAtu:0, uAnt:0, uParc:0, pdvs:new Set(), extra:r}; m.set(k,g); }
+    g.atual+=r.atual; g.ant+=r.ant; g.uAtu+=r.uAtu; g.uAnt+=r.uAnt; g.uParc+=(r.uParc||0);
     if(r.atual>0 && r.pdv) g.pdvs.add(r.pdv);
   }
   return [...m.values()].map(g=>{
@@ -1035,8 +1103,8 @@ function aggregate(rows, keyFn, labelFn){
   });
 }
 function totals(rows){
-  const t={atual:0,ant:0,uAtu:0,uAnt:0,pdvs:new Set()};
-  for(const r of rows){ t.atual+=r.atual; t.ant+=r.ant; t.uAtu+=r.uAtu; t.uAnt+=r.uAnt; if(r.atual>0&&r.pdv)t.pdvs.add(r.pdv); }
+  const t={atual:0,ant:0,uAtu:0,uAnt:0,uParc:0,pdvs:new Set()};
+  for(const r of rows){ t.atual+=r.atual; t.ant+=r.ant; t.uAtu+=r.uAtu; t.uAnt+=r.uAnt; t.uParc+=(r.uParc||0); if(r.atual>0&&r.pdv)t.pdvs.add(r.pdv); }
   t.pos=t.pdvs.size; t.ticket=t.uAtu>0?t.atual/t.uAtu:0; t.evo=evo(t.atual,t.ant); return t;
 }
 
@@ -1300,7 +1368,7 @@ function viewCidade(rows){
   const F=projFactor();
 
   const enrich=g=>{ g.evoR=g.evo; g.evoQ=evo(g.uAtu,g.uAnt); return g; };
-  const sortVal=(g,k)=>({label:g.label, ant:g.ant, atual:g.atual, uAnt:g.uAnt, uAtu:g.uAtu,
+  const sortVal=(g,k)=>({label:g.label, ant:g.ant, atual:g.atual, uAnt:g.uAnt, uAtu:g.uAtu, uParc:g.uParc||0,
     pos:g.pos, ticket:g.ticket, share:g.share||0,
     evoR:(g.evoR.val===Infinity?1e18:g.evoR.val), evoQ:(g.evoQ.val===Infinity?1e18:g.evoQ.val)}[k]);
   const applySort=(arr,st)=>{ arr.sort((a,b)=>{ const va=sortVal(a,st.sortKey), vb=sortVal(b,st.sortKey);
@@ -1332,6 +1400,7 @@ function viewCidade(rows){
         <td class="num barcell"><div class="bar g" style="--w:${g.atual/mx*100}"></div><span>${fmtBRL(g.atual)}</span></td>
         <td class="num"><span class="evo ${g.evo.cls}">${esc(g.evo.txt)}</span></td>
         <td class="num" style="color:var(--muted)">${fmtInt(g.uAnt)}</td>
+        ${tdParcial(g)}
         <td class="num">${fmtInt(g.uAtu)}</td>
       </tr>`).join("");
     return `<div class="drill drill-2">
@@ -1340,9 +1409,9 @@ function viewCidade(rows){
         <table class="data sub">
           <thead><tr><th>Marca</th>
             <th class="num">R$ ${p.antLbl}</th><th class="num">R$ ${p.atuLbl}</th><th class="num">Cresc.</th>
-            <th class="num">Qtd ${p.antLbl}</th><th class="num">Qtd ${p.atuLbl}</th>
+            <th class="num">Qtd ${p.antLbl}</th>${thParcial()}<th class="num">Qtd ${p.atuLbl}</th>
           </tr></thead>
-          <tbody>${body||`<tr><td colspan="6" class="empty-note">Sem marcas com venda.</td></tr>`}</tbody>
+          <tbody>${body||`<tr><td colspan="${projActive()?7:6}" class="empty-note">Sem marcas com venda.</td></tr>`}</tbody>
         </table>
       </div>
     </div>`;
@@ -1365,7 +1434,9 @@ function viewCidade(rows){
     });
     const fcols=[{k:"label",t:"Farmácia (PDV)",num:false},{k:"ant",t:"R$ "+p.antLbl,num:true},
       {k:"atual",t:"R$ "+p.atuLbl,num:true},{k:"evoR",t:"Cresc.",num:true},
-      {k:"uAnt",t:"Qtd "+p.antLbl,num:true},{k:"uAtu",t:"Qtd "+p.atuLbl,num:true}];
+      {k:"uAnt",t:"Qtd "+p.antLbl,num:true},
+      ...(projActive()?[{k:"uParc",t:"Qtd parcial "+parcialLbl(),num:true}]:[]),
+      {k:"uAtu",t:"Qtd "+p.atuLbl,num:true}];
     const fhead=`<th class="rank">#</th>`+fcols.map(c=>{ const on=stF.sortKey===c.k;
       return `<th class="${c.num?"num":""} ${on?"sorted":""}" data-cid2sort="${c.k}">${esc(c.t)}<span class="arrow">${on?(stF.sortDir<0?"▼":"▲"):""}</span></th>`; }).join("");
     const body=fa.map((g,i)=>{
@@ -1380,16 +1451,17 @@ function viewCidade(rows){
         <td class="num barcell"><div class="bar" style="--w:${g.atual/mx*100}"></div><span>${fmtBRL(g.atual)}</span></td>
         <td class="num"><span class="evo ${g.evo.cls}">${esc(g.evo.txt)}</span></td>
         <td class="num" style="color:var(--muted)">${fmtInt(g.uAnt)}</td>
+        ${tdParcial(g)}
         <td class="num">${fmtInt(g.uAtu)}</td>
       </tr>`;
-      const det = open ? `<tr class="drill-row"><td colspan="7">${marcaRows(cidKey,g.key)}</td></tr>` : "";
+      const det = open ? `<tr class="drill-row"><td colspan="${projActive()?8:7}">${marcaRows(cidKey,g.key)}</td></tr>` : "";
       return row+det;
     }).join("");
     return `<div class="drill drill-1">
       <div class="drill-h"><span class="dot"></span>PDVs com venda · ${fmtInt(fa.length)} <span class="hint">clique num PDV para ver as marcas</span></div>
       <div class="tbl-scroll">
         <table class="data sub"><thead><tr>${fhead}</tr></thead>
-          <tbody>${body||`<tr><td colspan="7" class="empty-note">Sem PDVs com venda.</td></tr>`}</tbody></table>
+          <tbody>${body||`<tr><td colspan="${projActive()?8:7}" class="empty-note">Sem PDVs com venda.</td></tr>`}</tbody></table>
       </div>
     </div>`;
   }
@@ -1473,6 +1545,7 @@ function buildPVTable(rows, titulo, ctx, opts){
       case "incR":   return g.incR;
       case "evoR":   return g.evoR.val===Infinity?1e18:g.evoR.val;
       case "uAnt":   return g.uAnt;
+      case "uParc":  return g.uParc;
       case "uAtu":   return g.uAtu;
       case "projQ":  return g.projQ;
       case "evoQ":   return g.evoQ.val===Infinity?1e18:g.evoQ.val;
@@ -1499,6 +1572,7 @@ function buildPVTable(rows, titulo, ctx, opts){
     {k:"incR",  t:"Incremento R$", num:true},
     {k:"evoR",  t:"Cresc. R$",     num:true},
     {k:"uAnt",  t:"Qtd "+p.antLbl, num:true},
+    ...(projActive()?[{k:"uParc", t:"Qtd parcial "+parcialLbl(), num:true}]:[]),
     {k:"uAtu",  t:"Qtd "+p.atuLbl, num:true},
     {k:"evoQ",  t:"Cresc. Qtd",    num:true}
   ];
@@ -1519,6 +1593,7 @@ function buildPVTable(rows, titulo, ctx, opts){
         <td class="num barcell"><div class="bar g" style="--w:${g.atual/mx*100}"></div><span>${fmtBRL(g.atual)}</span></td>
         <td class="num"><span class="evo ${g.evo.cls}">${esc(g.evo.txt)}</span></td>
         <td class="num" style="color:var(--muted)">${fmtInt(g.uAnt)}</td>
+        ${tdParcial(g)}
         <td class="num">${fmtInt(g.uAtu)}</td>
       </tr>`).join("");
     return `<div class="drill drill-2">
@@ -1528,9 +1603,9 @@ function buildPVTable(rows, titulo, ctx, opts){
           <thead><tr>
             <th>Apresentação</th>
             <th class="num">R$ ${p.antLbl}</th><th class="num">R$ ${p.atuLbl}</th><th class="num">Cresc.</th>
-            <th class="num">Qtd ${p.antLbl}</th><th class="num">Qtd ${p.atuLbl}</th>
+            <th class="num">Qtd ${p.antLbl}</th>${thParcial()}<th class="num">Qtd ${p.atuLbl}</th>
           </tr></thead>
-          <tbody>${body||`<tr><td colspan="6" class="empty-note">Sem apresentações com venda.</td></tr>`}</tbody>
+          <tbody>${body||`<tr><td colspan="${projActive()?7:6}" class="empty-note">Sem apresentações com venda.</td></tr>`}</tbody>
         </table>
       </div>
     </div>`;
@@ -1554,6 +1629,7 @@ function buildPVTable(rows, titulo, ctx, opts){
       {k:"atual", t:"R$ "+p.atuLbl,   num:true},
       {k:"evoR",  t:"Cresc.",         num:true},
       {k:"uAnt",  t:"Qtd "+p.antLbl,  num:true},
+      ...(projActive()?[{k:"uParc", t:"Qtd parcial "+parcialLbl(), num:true}]:[]),
       {k:"uAtu",  t:"Qtd "+p.atuLbl,  num:true}
     ];
     const fhead=`<th class="rank">#</th>`+fcols.map(c=>{
@@ -1571,9 +1647,10 @@ function buildPVTable(rows, titulo, ctx, opts){
         <td class="num barcell"><div class="bar" style="--w:${g.atual/mx*100}"></div><span>${fmtBRL(g.atual)}</span></td>
         <td class="num"><span class="evo ${g.evo.cls}">${esc(g.evo.txt)}</span></td>
         <td class="num" style="color:var(--muted)">${fmtInt(g.uAnt)}</td>
+        ${tdParcial(g)}
         <td class="num">${fmtInt(g.uAtu)}</td>
       </tr>`;
-      const det = open ? `<tr class="drill-row"><td colspan="7">${apresRows(pvKey,g.key)}</td></tr>` : "";
+      const det = open ? `<tr class="drill-row"><td colspan="${projActive()?8:7}">${apresRows(pvKey,g.key)}</td></tr>` : "";
       return row+det;
     }).join("");
     return `<div class="drill drill-1">
@@ -1602,10 +1679,11 @@ function buildPVTable(rows, titulo, ctx, opts){
       <td class="num"><span class="evo ${incCls(g.incR)}">${esc(incTxt(g.incR))}</span></td>
       <td class="num"><span class="evo ${g.evoR.cls}">${esc(g.evoR.txt)}</span></td>
       <td class="num" style="color:var(--muted)">${fmtInt(g.uAnt)}</td>
+      ${tdParcial(g)}
       <td class="num">${fmtInt(g.uAtu)}</td>
       <td class="num"><span class="evo ${g.evoQ.cls}">${esc(g.evoQ.txt)}</span></td>
     </tr>`;
-    const det = open ? `<tr class="drill-row"><td colspan="9">${pdvRows(g.key)}</td></tr>` : "";
+    const det = open ? `<tr class="drill-row"><td colspan="${projActive()?10:9}">${pdvRows(g.key)}</td></tr>` : "";
     return row+det;
   }).join("");
 
@@ -1632,6 +1710,7 @@ function buildPVTable(rows, titulo, ctx, opts){
           <td class="num"><span class="evo ${incCls(tIncR)}">${esc(incTxt(tIncR))}</span></td>
           <td class="num"><span class="evo ${t.evo.cls}">${esc(t.evo.txt)}</span></td>
           <td class="num" style="color:var(--muted)">${fmtInt(t.uAnt)}</td>
+          ${tdParcial(t)}
           <td class="num">${fmtInt(t.uAtu)}</td>
           <td class="num" style="color:var(--navy)">${fmtInt(tProjQ)}</td>
           <td class="num"><span class="evo ${evo(t.uAtu,t.uAnt).cls}">${esc(evo(t.uAtu,t.uAnt).txt)}</span></td>
@@ -2115,6 +2194,7 @@ function viewRede(rows){
         <td class="num barcell"><div class="bar g" style="--w:${g.atual/mx*100}"></div><span>${fmtBRL(g.atual)}</span></td>
         <td class="num"><span class="evo ${g.evo.cls}">${esc(g.evo.txt)}</span></td>
         <td class="num" style="color:var(--muted)">${fmtInt(g.uAnt)}</td>
+        ${tdParcial(g)}
         <td class="num">${fmtInt(g.uAtu)}</td>
       </tr>`).join("");
     return `<div class="drill drill-2">
@@ -2123,9 +2203,9 @@ function viewRede(rows){
         <table class="data sub">
           <thead><tr><th>Apresentação</th>
             <th class="num">R$ ${p.antLbl}</th><th class="num">R$ ${p.atuLbl}</th><th class="num">Cresc.</th>
-            <th class="num">Qtd ${p.antLbl}</th><th class="num">Qtd ${p.atuLbl}</th>
+            <th class="num">Qtd ${p.antLbl}</th>${thParcial()}<th class="num">Qtd ${p.atuLbl}</th>
           </tr></thead>
-          <tbody>${body||`<tr><td colspan="6" class="empty-note">Sem apresentações com venda.</td></tr>`}</tbody>
+          <tbody>${body||`<tr><td colspan="${projActive()?7:6}" class="empty-note">Sem apresentações com venda.</td></tr>`}</tbody>
         </table>
       </div>
     </div>`;
@@ -2150,9 +2230,10 @@ function viewRede(rows){
         <td class="num barcell"><div class="bar" style="--w:${g.atual/mx*100}"></div><span>${fmtBRL(g.atual)}</span></td>
         <td class="num"><span class="evo ${g.evo.cls}">${esc(g.evo.txt)}</span></td>
         <td class="num" style="color:var(--muted)">${fmtInt(g.uAnt)}</td>
+        ${tdParcial(g)}
         <td class="num">${fmtInt(g.uAtu)}</td>
       </tr>`;
-      const det = open ? `<tr class="drill-row"><td colspan="7">${apresRows(band,g.key)}</td></tr>` : "";
+      const det = open ? `<tr class="drill-row"><td colspan="${projActive()?8:7}">${apresRows(band,g.key)}</td></tr>` : "";
       return row+det;
     }).join("");
     return `<div class="drill drill-1">
@@ -2161,9 +2242,9 @@ function viewRede(rows){
         <table class="data sub"><thead><tr>
           <th class="rank">#</th><th>Loja (endereço)</th>
           <th class="num">R$ ${p.antLbl}</th><th class="num">R$ ${p.atuLbl}</th><th class="num">Cresc.</th>
-          <th class="num">Qtd ${p.antLbl}</th><th class="num">Qtd ${p.atuLbl}</th>
+          <th class="num">Qtd ${p.antLbl}</th>${thParcial()}<th class="num">Qtd ${p.atuLbl}</th>
         </tr></thead>
-          <tbody>${body||`<tr><td colspan="7" class="empty-note">Sem lojas com venda.</td></tr>`}</tbody></table>
+          <tbody>${body||`<tr><td colspan="${projActive()?8:7}" class="empty-note">Sem lojas com venda.</td></tr>`}</tbody></table>
       </div>
     </div>`;
   }
@@ -2171,7 +2252,7 @@ function viewRede(rows){
   // tabela por bandeira (nível 1, drilável)
   const data=aggregate(rows,r=>r.bandeira);
   const tipoMap=new Map(); rows.forEach(r=>{ if(!tipoMap.has(r.bandeira)) tipoMap.set(r.bandeira, r.tipo); });
-  data.forEach(g=>{ g.sub=tipoMap.get(g.key)==="REDE"?"Rede":"Independente"; g.share=t.atual>0?g.atual/t.atual*100:0; g.inc=g.atual-g.ant; });
+  data.forEach(g=>{ const tp=tipoMap.get(g.key); g.sub=tp==="REDE"?"Rede":tp==="INDEPENDENTE"?"Independente":"⚠ Não classificada"; g.share=t.atual>0?g.atual/t.atual*100:0; g.inc=g.atual-g.ant; });
   const st=tState("Redes"); sortData(data,st);
   const q=(st.q||"").toLowerCase();
   let view=q?data.filter(g=>String(g.label).toLowerCase().includes(q)):data.slice();
@@ -2197,7 +2278,7 @@ function viewRede(rows){
     const w=(g.atual/maxAtual*100);
     const row=`<tr class="drillable ${open?"open":""}" data-redeband1="${esc(g.key)}">
       <td class="rank">${i+1}</td>
-      <td class="namecell"><div><span class="caret">${open?"▾":"▸"}</span> ${esc(trim(g.label,42))}</div><span class="tag ${g.sub==="Rede"?"rede":"ind"}">${esc(g.sub)}</span></td>
+      <td class="namecell"><div><span class="caret">${open?"▾":"▸"}</span> ${esc(trim(g.label,42))}</div><span class="tag ${g.sub==="Rede"?"rede":g.sub==="Independente"?"ind":"warn"}">${esc(g.sub)}</span></td>
       <td class="num barcell"><div class="bar" style="--w:${w}"></div><span>${fmtBRL(g.atual)}</span></td>
       <td class="num" style="color:var(--muted)">${fmtBRL(g.ant)}</td>
       <td class="num"><span class="evo ${g.evo.cls}">${esc(g.evo.txt)}</span></td>
@@ -2257,7 +2338,7 @@ function buildTable(view, o){
     const w=(g.atual/o.maxAtual*100);
     const clickable=o.clickFilter?`class="clickable" data-filter="${o.clickFilter}" data-val="${esc(g.key)}"`:"";
     const subHtml = o.sub ? (o.tagSub
-        ? `<span class="tag ${g.sub==="Rede"?"rede":"ind"}">${esc(g.sub)}</span>`
+        ? `<span class="tag ${g.sub==="Rede"?"rede":g.sub==="Independente"?"ind":"warn"}">${esc(g.sub)}</span>`
         : `<div class="sub">${esc(g.sub||"")}</div>`) : "";
     return `<tr ${clickable}>
       <td class="rank">${i+1}</td>
@@ -2466,6 +2547,8 @@ document.querySelectorAll(".tab").forEach(t=>{
 document.getElementById("btnReset").addEventListener("click",()=>{
   STATE.filters={setor:"",canal:"",tipo:""};
   ["fSetor","fCanal","fTipo"].forEach(id=>document.getElementById(id).value="");
+  STATE.products=null;
+  const pl=document.getElementById("prodBtnLbl"); if(pl) pl.textContent="todos";
   render();
 });
 document.getElementById("btnRefresh").addEventListener("click",()=>{
@@ -2558,6 +2641,41 @@ function closeCityPopOnOutside(e){
 }
 document.addEventListener("click", closeCityPopOnOutside);
 document.addEventListener("touchstart", closeCityPopOnOutside, {passive:true});
+
+/* ---- filtro de produto (checkbox: um/vários/todos) ---- */
+function buildProdPop(){
+  const pop=document.getElementById("prodPop");
+  const all=uniqueSorted(STATE.rows.map(r=>r.marca));
+  const sel=STATE.products;
+  pop.innerHTML =
+    '<input type="search" id="prodSearch" placeholder="Buscar produto…">'+
+    '<div class="citypop-actions"><button id="prodAll">Todos</button><button id="prodNone">Nenhum</button></div>'+
+    '<div class="citypop-list" id="prodList">'+
+      all.map(c=>'<label><input type="checkbox" value="'+esc(c)+'" '+((!sel||sel.has(c))?"checked":"")+'>'+esc(c)+'</label>').join("")+
+    '</div>';
+  const relist=q=>{ document.querySelectorAll("#prodList label").forEach(l=>{ l.style.display = l.textContent.toLowerCase().includes(q)?"":"none"; }); };
+  pop.querySelector("#prodSearch").addEventListener("input",e=>relist(e.target.value.toLowerCase()));
+  const apply=()=>{
+    const checks=[...document.querySelectorAll("#prodList input:checked")].map(i=>i.value);
+    STATE.products = (checks.length===all.length)?null:new Set(checks);
+    document.getElementById("prodBtnLbl").textContent = !STATE.products?"todos":(checks.length+" selec.");
+    refreshTemporal();
+  };
+  pop.querySelectorAll("#prodList input").forEach(i=>i.addEventListener("change",apply));
+  pop.querySelector("#prodAll").addEventListener("click",()=>{ document.querySelectorAll("#prodList input").forEach(i=>i.checked=true); apply(); });
+  pop.querySelector("#prodNone").addEventListener("click",()=>{ document.querySelectorAll("#prodList input").forEach(i=>i.checked=false); apply(); });
+}
+document.getElementById("prodBtn").addEventListener("click",()=>{
+  const pop=document.getElementById("prodPop");
+  const show = pop.style.display==="none";
+  if(show){ buildProdPop(); pop.style.display="flex"; } else pop.style.display="none";
+});
+function closeProdPopOnOutside(e){
+  const pop=document.getElementById("prodPop");
+  if(pop && pop.style.display!=="none" && !e.target.closest("#prodPop") && !e.target.closest("#prodBtn")) pop.style.display="none";
+}
+document.addEventListener("click", closeProdPopOnOutside);
+document.addEventListener("touchstart", closeProdPopOnOutside, {passive:true});
 
 /* ============================================================================
    INICIALIZAÇÃO
